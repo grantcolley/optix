@@ -1,3 +1,9 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.IdentityModel.Tokens;
+using Optix.Web.API.Authorization;
+using Optix.Web.API.Config;
+using Optix.Web.API.Constants;
 using Serilog;
 using Serilog.Events;
 
@@ -7,6 +13,10 @@ builder.Configuration
     .SetBasePath(AppContext.BaseDirectory)
     .AddJsonFile($"appsettings.{builder.Environment.EnvironmentName}.json", optional: false, reloadOnChange: true)
     .AddEnvironmentVariables();
+
+string? domain = builder.Configuration[ConfigKeys.AUTH_DOMAIN] ?? throw new NullReferenceException(ConfigKeys.AUTH_DOMAIN);
+string? audience = builder.Configuration[ConfigKeys.AUTH_AUDIENCE] ?? throw new NullReferenceException(ConfigKeys.AUTH_AUDIENCE);
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
 
 builder.Host.UseSerilog((ctx, lc) =>
 {
@@ -25,8 +35,37 @@ builder.Host.UseSerilog((ctx, lc) =>
           shared: true);
 });
 
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = domain;
+        options.Audience = audience;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = domain,
+            ValidAudience = audience,
+            NameClaimType = "sub",
+        };
+    });
+
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(Claims.OPTIX_CLIENT_ID, policy =>
+    {
+        policy.AddRequirements(new AllowedClientRequirement());
+    })
+    .AddPolicy(Claims.OPTIX_USER_CLAIM, policy =>
+    {
+        policy.RequireAuthenticatedUser().RequireClaim("permissions", Claims.OPTIX_USER_CLAIM);
+    })
+    .AddPolicy(Claims.OPTIX_DEVELOPER_CLAIM, policy =>
+    {
+        policy.RequireAuthenticatedUser().RequireClaim("permissions", Claims.OPTIX_DEVELOPER_CLAIM);
+    });
+
 // Add services to the container.
 builder.Services.AddOpenApi();
+
+builder.Services.AddSingleton<IAuthorizationHandler, AllowedClientHandler>();
 
 var app = builder.Build();
 
@@ -37,6 +76,9 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 var summaries = new[]
 {
@@ -55,7 +97,13 @@ app.MapGet("/weatherforecast", () =>
         .ToArray();
     return forecast;
 })
-.WithName("GetWeatherForecast");
+    .WithName("weatherforecast")
+    .WithDescription("Gets a 5-day weather forecast")
+    .Produces<WeatherForecast[]>(StatusCodes.Status200OK)
+    .Produces(StatusCodes.Status401Unauthorized)
+    .Produces(StatusCodes.Status403Forbidden)
+    .Produces(StatusCodes.Status500InternalServerError)
+    .RequireAuthorization(Claims.OPTIX_CLIENT_ID, Claims.OPTIX_USER_CLAIM);
 
 app.Run();
 
